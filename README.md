@@ -10,7 +10,8 @@ Multi-cloud Kubernetes POD / NodePool resource utilization reports and AI agent 
 | `pod_multicloud_resource_utilization.sh` | Text report for AKS / EKS / GKE / OKE / OCP |
 | `pod_aks_resource_utilization_html.sh` | AKS HTML report (+ optional email) |
 | `pod_aks_resource_utilization.sh` | AKS text report (legacy / reference) |
-| `agent/` | Cursor SDK agent (collect + AI analysis) |
+| `agent/` | Cursor SDK CLI + **MCP server** (`npm run mcp`) |
+| `.cursor/mcp.json` | Cursor MCP registration for `pod-res-util` |
 | `.cursor/skills/pod-res-util/` | Cursor IDE skill |
 
 ## Quick start

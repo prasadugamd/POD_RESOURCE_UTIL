@@ -1,26 +1,29 @@
 /**
- * POD Resource Utilization — Cursor SDK agent
+ * POD Resource Utilization — Cursor SDK CLI agent
  *
  * 1) Runs the CLI orchestrator (or analyzes an existing report)
  * 2) Asks a local Cursor agent to produce capacity / rightsizing recommendations
  *
- * Requires: CURSOR_API_KEY, Node >= 22.13, kubectl/oc access for live runs
+ * For MCP (Cursor IDE tools), use: npm run mcp
+ * Requires: CURSOR_API_KEY (CLI analyze only), Node >= 22.13, kubectl/oc for live runs
  */
 
-import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
-import { readFile, writeFile, mkdir } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 import { Agent, CursorAgentError } from "@cursor/sdk";
-
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = path.resolve(__dirname, "../..");
-const AGENT_DIR = path.resolve(__dirname, "..");
-const ORCHESTRATOR = path.join(REPO_ROOT, "pod_res_util_agent.sh");
+import {
+  REPO_ROOT,
+  REPORTS_DIR,
+  buildAnalysisPrompt,
+  findLatestTextReport,
+  readReportFile,
+  runPodResourceReport,
+  type ReportMode,
+} from "./lib.js";
 
 type CliArgs = {
-  mode: "auto" | "aks-html" | "multicloud" | "both";
+  mode: ReportMode;
   namespaces: string[];
   analyzeOnly: boolean;
   reportPath?: string;
@@ -32,10 +35,10 @@ function usage(): never {
   console.error(`Usage:
   npm run agent -- [--mode auto|aks-html|multicloud|both] [--no-email] <ns> [ns...]
   npm run agent -- --analyze <report.txt>
-  npm run analyze -- --analyze <report.txt>
+  npm run mcp                              # start MCP stdio server
 
 Env:
-  CURSOR_API_KEY   required
+  CURSOR_API_KEY   required for CLI AI analysis
   CURSOR_MODEL     optional (default: composer-2.5)
 `);
   process.exit(1);
@@ -53,7 +56,7 @@ function parseArgs(argv: string[]): CliArgs {
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--mode") {
-      const v = argv[++i] as CliArgs["mode"];
+      const v = argv[++i] as ReportMode;
       if (!["auto", "aks-html", "multicloud", "both"].includes(v)) usage();
       args.mode = v;
     } else if (a === "--no-email") {
@@ -81,77 +84,6 @@ function parseArgs(argv: string[]): CliArgs {
   return args;
 }
 
-function runCommand(
-  command: string,
-  args: string[],
-  cwd: string,
-  env?: NodeJS.ProcessEnv,
-): Promise<{ code: number; stdout: string; stderr: string }> {
-  return new Promise((resolve, reject) => {
-    const child = spawn(command, args, {
-      cwd,
-      env: { ...process.env, ...env },
-      shell: process.platform === "win32",
-    });
-    let stdout = "";
-    let stderr = "";
-    child.stdout.on("data", (d: Buffer) => {
-      const s = d.toString();
-      stdout += s;
-      process.stdout.write(s);
-    });
-    child.stderr.on("data", (d: Buffer) => {
-      const s = d.toString();
-      stderr += s;
-      process.stderr.write(s);
-    });
-    child.on("error", reject);
-    child.on("close", (code) => {
-      resolve({ code: code ?? 1, stdout, stderr });
-    });
-  });
-}
-
-async function findLatestTextReport(reportsDir: string): Promise<string | undefined> {
-  if (!existsSync(reportsDir)) return undefined;
-  const { readdir } = await import("node:fs/promises");
-  const files = (await readdir(reportsDir))
-    .filter((f) => f.endsWith(".txt"))
-    .sort()
-    .reverse();
-  return files[0] ? path.join(reportsDir, files[0]) : undefined;
-}
-
-function buildAnalysisPrompt(reportText: string, meta: Record<string, string>): string {
-  const clipped =
-    reportText.length > 120_000
-      ? reportText.slice(0, 120_000) + "\n\n[... truncated for prompt size ...]\n"
-      : reportText;
-
-  return `You are a Kubernetes capacity and rightsizing advisor for A1 TC platforms (AKS / EKS / GKE / OKE / OCP).
-
-Analyze the POD resource utilization report below and produce actionable recommendations.
-
-Context:
-${Object.entries(meta)
-  .map(([k, v]) => `- ${k}: ${v}`)
-  .join("\n")}
-
-Report:
-\`\`\`
-${clipped}
-\`\`\`
-
-Respond in markdown with these sections only:
-1. **Executive summary** (3-5 bullets; overall risk: OK / WARN / CRITICAL)
-2. **Pool pressure** — which pools need nodes vs rightsizing vs burst investigation
-3. **Pending pods** — root causes and fix order
-4. **Top rightsizing opportunities** — concrete request changes (CPU/Mem) with expected freed capacity
-5. **Next actions** — prioritized checklist for the platform team
-
-Be specific to numbers in the report. Do not invent metrics that are not present.`;
-}
-
 async function analyzeWithCursor(
   reportText: string,
   meta: Record<string, string>,
@@ -177,37 +109,25 @@ async function analyzeWithCursor(
 
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
-  const reportsDir = path.join(REPO_ROOT, "reports");
-  await mkdir(reportsDir, { recursive: true });
+  await mkdir(REPORTS_DIR, { recursive: true });
 
   let reportPath = args.reportPath;
   let orchestratorCode = 0;
 
   if (!args.analyzeOnly) {
-    if (!existsSync(ORCHESTRATOR)) {
-      console.error(`Missing orchestrator: ${ORCHESTRATOR}`);
-      process.exit(1);
-    }
-
-    const orchArgs = ["--mode", args.mode, "--out-dir", reportsDir];
-    if (args.noEmail) orchArgs.push("--no-email");
-    orchArgs.push(...args.namespaces);
-
     console.log("\n=== Running CLI orchestrator ===\n");
-    // Git Bash / WSL / bash on PATH
-    const bashCmd = process.platform === "win32" ? "bash" : "bash";
-    const run = await runCommand(bashCmd, [ORCHESTRATOR, ...orchArgs], REPO_ROOT, {
-      SEND_EMAIL: args.noEmail ? "false" : process.env.SEND_EMAIL,
+    const result = await runPodResourceReport({
+      namespaces: args.namespaces,
+      mode: args.mode,
+      noEmail: args.noEmail,
+      echo: true,
     });
-    orchestratorCode = run.code;
+    orchestratorCode = result.code;
+    reportPath = result.textReportPath;
+  }
 
-    reportPath = await findLatestTextReport(reportsDir);
-    if (!reportPath && args.mode === "aks-html") {
-      // HTML-only mode: still ask agent using orchestrator stdout
-      const fallback = path.join(reportsDir, `orchestrator_stdout_${Date.now()}.txt`);
-      await writeFile(fallback, run.stdout || run.stderr || "(empty)", "utf8");
-      reportPath = fallback;
-    }
+  if (!reportPath || !existsSync(reportPath)) {
+    reportPath = await findLatestTextReport();
   }
 
   if (!reportPath || !existsSync(reportPath)) {
@@ -217,7 +137,7 @@ async function main(): Promise<void> {
     process.exit(orchestratorCode || 1);
   }
 
-  const reportText = await readFile(reportPath, "utf8");
+  const reportText = await readReportFile(reportPath);
   const meta = {
     report: reportPath,
     mode: args.mode,
@@ -238,7 +158,7 @@ async function main(): Promise<void> {
   }
 
   const analysisPath = path.join(
-    reportsDir,
+    REPORTS_DIR,
     `ai_analysis_${new Date().toISOString().replace(/[:.]/g, "-")}.md`,
   );
   await writeFile(analysisPath, analysis, "utf8");
