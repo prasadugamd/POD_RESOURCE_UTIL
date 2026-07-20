@@ -27,15 +27,18 @@ type CliArgs = {
   namespaces: string[];
   analyzeOnly: boolean;
   reportPath?: string;
+  /** false = allow email (opt-in). Default true = never send. */
   noEmail: boolean;
   model: string;
 };
 
 function usage(): never {
   console.error(`Usage:
-  npm run agent -- [--mode auto|aks-html|multicloud|both] [--no-email] <ns> [ns...]
+  npm run agent -- [--mode auto|aks-html|multicloud|both] [--no-email|--send-email] <ns> [ns...]
   npm run agent -- --analyze <report.txt>
   npm run mcp                              # start MCP stdio server
+
+Email is OFF by default. Pass --send-email only when you explicitly want HTML mail.
 
 Env:
   CURSOR_API_KEY   required for CLI AI analysis
@@ -49,7 +52,7 @@ function parseArgs(argv: string[]): CliArgs {
     mode: "auto",
     namespaces: [],
     analyzeOnly: false,
-    noEmail: false,
+    noEmail: true, // skill: never email unless user asks
     model: process.env.CURSOR_MODEL || "composer-2.5",
   };
 
@@ -61,6 +64,8 @@ function parseArgs(argv: string[]): CliArgs {
       args.mode = v;
     } else if (a === "--no-email") {
       args.noEmail = true;
+    } else if (a === "--send-email") {
+      args.noEmail = false;
     } else if (a === "--analyze" || a === "--analyze-only") {
       args.analyzeOnly = true;
       if (a === "--analyze" && argv[i + 1] && !argv[i + 1].startsWith("-")) {
@@ -112,6 +117,7 @@ async function main(): Promise<void> {
   await mkdir(REPORTS_DIR, { recursive: true });
 
   let reportPath = args.reportPath;
+  let htmlReportPath: string | undefined;
   let orchestratorCode = 0;
 
   if (!args.analyzeOnly) {
@@ -124,6 +130,7 @@ async function main(): Promise<void> {
     });
     orchestratorCode = result.code;
     reportPath = result.textReportPath;
+    htmlReportPath = result.htmlReportPath;
   }
 
   if (!reportPath || !existsSync(reportPath)) {
@@ -131,6 +138,14 @@ async function main(): Promise<void> {
   }
 
   if (!reportPath || !existsSync(reportPath)) {
+    if (htmlReportPath && existsSync(htmlReportPath)) {
+      console.error(
+        "No structured text report to analyze (aks-html produces HTML, not analysis-ready text).",
+      );
+      console.error(`HTML report saved: ${htmlReportPath}`);
+      console.error("Tip: use --mode multicloud or --mode both for AI analysis input.");
+      process.exit(orchestratorCode);
+    }
     console.error(
       "No text report found to analyze. Use --mode multicloud|both, or --analyze <file>.",
     );

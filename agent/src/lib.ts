@@ -5,7 +5,7 @@
 
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -52,7 +52,12 @@ export async function findLatestTextReport(
 ): Promise<string | undefined> {
   if (!existsSync(reportsDir)) return undefined;
   const files = (await readdir(reportsDir))
-    .filter((f) => f.endsWith(".txt"))
+    .filter(
+      (f) =>
+        f.endsWith(".txt") &&
+        !f.startsWith("orchestrator_stdout_") &&
+        f.startsWith("pod_res_util_"),
+    )
     .sort()
     .reverse();
   return files[0] ? path.join(reportsDir, files[0]) : undefined;
@@ -71,6 +76,7 @@ export async function listReports(reportsDir: string = REPORTS_DIR): Promise<str
 export type RunReportInput = {
   namespaces: string[];
   mode?: ReportMode;
+  /** When false, allow HTML email. Default / true / undefined => never send. */
   noEmail?: boolean;
   kubeCmd?: string;
   poolLabelKeys?: string;
@@ -100,12 +106,15 @@ export async function runPodResourceReport(input: RunReportInput): Promise<RunRe
 
   await mkdir(REPORTS_DIR, { recursive: true });
 
+  // Email is opt-in only. Default / undefined => do not send.
+  const allowEmail = input.noEmail === false;
+
   const orchArgs = ["--mode", mode, "--out-dir", REPORTS_DIR];
-  if (input.noEmail !== false) orchArgs.push("--no-email");
+  if (!allowEmail) orchArgs.push("--no-email");
   orchArgs.push(...input.namespaces);
 
   const env: NodeJS.ProcessEnv = {
-    SEND_EMAIL: input.noEmail === false ? process.env.SEND_EMAIL ?? "true" : "false",
+    SEND_EMAIL: allowEmail ? "true" : "false",
   };
   if (input.kubeCmd) env.KUBE_CMD = input.kubeCmd;
   if (input.poolLabelKeys) env.POOL_LABEL_KEYS = input.poolLabelKeys;
@@ -119,12 +128,8 @@ export async function runPodResourceReport(input: RunReportInput): Promise<RunRe
     echo: input.echo ?? false,
   });
 
-  let textReportPath = await findLatestTextReport(REPORTS_DIR);
-  if (!textReportPath && (mode === "aks-html" || mode === "auto")) {
-    const fallback = path.join(REPORTS_DIR, `orchestrator_stdout_${Date.now()}.txt`);
-    await writeFile(fallback, run.stdout || run.stderr || "(empty)", "utf8");
-    textReportPath = fallback;
-  }
+  // Only use real multi-cloud .txt reports — never invent one from orchestrator logs.
+  const textReportPath = await findLatestTextReport(REPORTS_DIR);
 
   const all = await listReports(REPORTS_DIR);
   const htmlReportPath = all.find((p) => p.endsWith(".html"));

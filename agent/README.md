@@ -44,11 +44,13 @@ Example host prompt: *“Use run_pod_resource_report for namespace pet01-k8s in 
 
 ```bash
 export CURSOR_API_KEY="cursor_..."
-npm run agent -- --mode multicloud --no-email pet01-k8s
+npm run agent -- --mode multicloud pet01-k8s
 npm run agent -- --analyze ../reports/pod_res_util_20260720_120000.txt
+# Email is off by default; opt in only when needed:
+npm run agent -- --mode aks-html --send-email pet01-k8s
 ```
 
-Outputs land in `../reports/`.
+Outputs land in `../reports/`. AI analysis needs a structured `.txt` report (`multicloud` or `both`). `aks-html` alone skips analysis and points at the HTML file.
 
 ## Modes
 

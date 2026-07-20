@@ -47,7 +47,7 @@ server.tool(
     no_email: z
       .boolean()
       .default(true)
-      .describe("If true, do not send HTML email (recommended)"),
+      .describe("If true (default), do not send HTML email. Set false only when user explicitly asks to email."),
     kube_cmd: z.string().optional().describe("kubectl or oc"),
     pool_label_keys: z
       .string()
